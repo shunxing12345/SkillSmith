@@ -253,6 +253,11 @@ class ToolDispatcher:
                     skill_name=skill_name,
                     request=request_text,
                     envelope=envelope,
+                    task_status="uncertain",
+                    verification_status="unverified",
+                    confidence=0.35,
+                    feedback_source="runtime",
+                    feedback_note="skill executed without runtime error",
                 )
             except Exception as e:
                 logger.warning(

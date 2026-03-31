@@ -162,7 +162,24 @@ def pip_shim_path(venv_path: Path) -> Path:
     return venv_bin_dir(venv_path) / name
 
 
-def pip_shim_content(python_path: Path) -> str:
+def pip_shim_content(python_path: Path, uv_path: Path | None = None) -> str:
+    """Build a pip shim.
+
+    When ``uv_path`` is available, route ``pip`` invocations through
+    ``uv pip --python <venv-python>`` so the sandbox does not depend on
+    ``pip`` being preinstalled inside the venv.
+    """
+    if uv_path is not None:
+        if os.name == "posix":
+            return (
+                '#!/bin/sh\n'
+                f'exec "{uv_path}" pip --python "{python_path}" "$@"\n'
+            )
+        return (
+            '@echo off\n'
+            f'"{uv_path}" pip --python "{python_path}" %*\n'
+        )
+
     if os.name == "posix":
         return f'#!/bin/sh\nexec "{python_path}" -m pip "$@"\n'
     return f'@echo off\n"{python_path}" -m pip %*\n'

@@ -12,12 +12,15 @@ import json
 import re
 from typing import Any, AsyncGenerator
 
+from pydantic import BaseModel
+
 from core.manager.session_context import ActionRecord, SessionContext
 from core.prompts.templates import (
     ERROR_POLICY_MSG,
     EXEC_FAILURES_EXCEEDED_MSG,
     FINALIZE_INSTRUCTION,
     MAX_ITERATIONS_MSG,
+    RUN_OUTCOME_PROMPT,
     SKILL_CHECK_HINT_MSG,
     STEP_COMPLETED_MSG,
     STEP_GOAL_HINT,
@@ -31,14 +34,22 @@ from utils.debug_logger import log_agent_phase
 from utils.logger import get_logger
 
 from .state import AgentRunState
-from ..emitters import emit_finalize, emit_text_message, stream_and_finalize
+from ..emitters import emit_finalize, emit_text_message, persist_session_summary
 from ..stream_output import AGUIEventType, AgentFinishReason, build_event, new_run_id
 from ..tools import TOOL_EXECUTE_SKILL, TOOL_SEARCH_SKILL, ToolDispatcher
-from ..utils import can_direct_execute_skill, skill_call_to_openai_payload
+from ..utils import can_direct_execute_skill, extract_json, skill_call_to_openai_payload
 from .planning import generate_plan
 from .reflection import ReflectionDecision, reflect
 
 logger = get_logger(__name__)
+
+
+class RunOutcomeAssessment(BaseModel):
+    execution_status: str = "success"
+    task_status: str = "uncertain"
+    verification_status: str = "unverified"
+    confidence: float = 0.0
+    feedback_note: str = ""
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -374,13 +385,67 @@ async def _finalize_run(
     """Inject FINALIZE_INSTRUCTION and stream the final answer."""
     finalize_msg = {"role": "system", "content": FINALIZE_INSTRUCTION}
     state.messages = await _append_messages(ctx, state.messages, [finalize_msg])
-    async for ev in stream_and_finalize(
-        messages=state.messages, llm=llm, tools=None,
-        run_id=run_id, session_id=session_id, step=step,
-        step_usage=step_usage,
-        session_ctx=session_ctx, session_manager=session_manager,
-    ):
-        yield ev
+
+    yield build_event(
+        AGUIEventType.STEP_FINISHED, run_id, session_id,
+        step=step, status="finalize",
+    )
+
+    msg_id = new_run_id()
+    yield build_event(
+        AGUIEventType.TEXT_MESSAGE_START, run_id, session_id,
+        messageId=msg_id, role="assistant",
+    )
+
+    text_parts: list[str] = []
+    async for chunk in llm.async_stream_chat(messages=state.messages, tools=None):
+        if chunk.usage:
+            step_usage = chunk.usage
+        if chunk.delta_content:
+            text_parts.append(chunk.delta_content)
+            yield build_event(
+                AGUIEventType.TEXT_MESSAGE_CONTENT, run_id, session_id,
+                messageId=msg_id, delta=chunk.delta_content,
+            )
+
+    yield build_event(
+        AGUIEventType.TEXT_MESSAGE_END, run_id, session_id,
+        messageId=msg_id,
+    )
+
+    final_text = "".join(text_parts).strip()
+    assessment = await _evaluate_run_outcome(
+        llm=llm,
+        state=state,
+        session_ctx=session_ctx,
+        final_text=final_text,
+    )
+    session_ctx.set_run_outcome(
+        execution_status=assessment.execution_status,
+        task_status=assessment.task_status,
+        verification_status=assessment.verification_status,
+        confidence=assessment.confidence,
+        feedback_note=assessment.feedback_note,
+    )
+
+    await persist_session_summary(session_ctx, session_manager, session_id)
+    if session_manager is not None:
+        try:
+            await session_manager.update_session(
+                session_id,
+                metadata={
+                    "last_run_outcome": assessment.model_dump(),
+                },
+            )
+        except Exception as e:
+            logger.debug("Run outcome persistence failed: {}", e)
+
+    yield build_event(
+        AGUIEventType.RUN_FINISHED, run_id, session_id,
+        outputText=final_text,
+        reason=AgentFinishReason.FINAL_ANSWER.value,
+        usage=step_usage,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -540,3 +605,65 @@ async def _append_messages(
         return await ctx.append(messages, new_msgs)
     return list(messages) + new_msgs
 
+
+async def _evaluate_run_outcome(
+    *,
+    llm: LLMClient,
+    state: AgentRunState,
+    session_ctx: SessionContext,
+    final_text: str,
+) -> RunOutcomeAssessment:
+    """Assess final run quality without changing step-level reflection semantics."""
+    if not final_text.strip():
+        return RunOutcomeAssessment(
+            execution_status="failed",
+            task_status="failed",
+            verification_status="unverified",
+            confidence=0.95,
+            feedback_note="run finished without a final answer",
+        )
+
+    plan = state.task_plan
+    plan_lines = []
+    if plan is not None:
+        for step in plan.steps:
+            plan_lines.append(f"Step {step.step_id}: {step.action} -> {step.expected_output}")
+    recent_actions = [
+        f"- {(a.skill_name or a.tool_name)}: {'OK' if a.success else 'FAIL'} | {a.result_summary}"
+        for a in session_ctx.action_history[-6:]
+    ]
+    prompt = RUN_OUTCOME_PROMPT.format(
+        goal=(plan.goal if plan is not None else session_ctx.session_goal or "(unknown goal)"),
+        plan="\n".join(plan_lines) or "(no explicit plan)",
+        final_answer=final_text[:6000],
+        recent_actions="\n".join(recent_actions) or "(no recorded actions)",
+    )
+
+    try:
+        resp = await llm.async_chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=500,
+        )
+        data = extract_json((resp.content or "").strip())
+    except Exception as e:
+        logger.debug("Run outcome evaluation failed, using conservative default: {}", e)
+        return RunOutcomeAssessment(
+            execution_status="success",
+            task_status="uncertain",
+            verification_status="unverified",
+            confidence=0.35,
+            feedback_note="final answer produced but correctness is unverified",
+        )
+
+    try:
+        return RunOutcomeAssessment(**data)
+    except Exception as e:
+        logger.debug("Run outcome payload invalid, using conservative default: {}", e)
+        return RunOutcomeAssessment(
+            execution_status="success",
+            task_status="uncertain",
+            verification_status="unverified",
+            confidence=0.35,
+            feedback_note="final answer produced but correctness is unverified",
+        )

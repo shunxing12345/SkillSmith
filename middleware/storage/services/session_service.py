@@ -9,6 +9,7 @@ from middleware.storage.models import Session, SessionStatus
 from middleware.storage.schemas import SessionCreate, SessionRead, SessionUpdate
 from middleware.storage.utils import get_east_8_time
 from .base_service import BaseService
+from .sqlite_fallback import connect, dumps_json, loads_json, new_id
 
 
 class SessionService(BaseService):
@@ -25,7 +26,7 @@ class SessionService(BaseService):
         Returns:
             Created session
         """
-        return await self._with_session(lambda db: self._create(db, data))
+        return self._create_sqlite(data)
 
     async def get(self, session_id: str) -> SessionRead | None:
         """Get session by ID.
@@ -36,7 +37,7 @@ class SessionService(BaseService):
         Returns:
             Session or None if not found
         """
-        return await self._with_session(lambda db: self._get(db, session_id))
+        return self._get_sqlite(session_id)
 
     async def update(self, session_id: str, data: SessionUpdate) -> SessionRead | None:
         """Update session.
@@ -48,7 +49,7 @@ class SessionService(BaseService):
         Returns:
             Updated session or None if not found
         """
-        return await self._with_session(lambda db: self._update(db, session_id, data))
+        return self._update_sqlite(session_id, data)
 
     async def delete(self, session_id: str) -> bool:
         """Delete session.
@@ -59,7 +60,7 @@ class SessionService(BaseService):
         Returns:
             True if deleted, False if not found
         """
-        return await self._with_session(lambda db: self._delete(db, session_id))
+        return self._delete_sqlite(session_id)
 
     async def list_recent(self, limit: int = 20) -> list[SessionRead]:
         """Get recent sessions.
@@ -70,7 +71,7 @@ class SessionService(BaseService):
         Returns:
             List of sessions ordered by updated_at desc
         """
-        return await self._with_session(lambda db: self._list_recent(db, limit))
+        return self._list_recent_sqlite(limit)
 
     async def list_by_status(self, status: str, limit: int = 100) -> list[SessionRead]:
         """Get sessions by status.
@@ -82,9 +83,121 @@ class SessionService(BaseService):
         Returns:
             List of sessions
         """
-        return await self._with_session(
-            lambda db: self._list_by_status(db, status, limit)
+        return self._list_by_status_sqlite(status, limit)
+
+    @staticmethod
+    def _row_to_read(row) -> SessionRead:
+        return SessionRead(
+            id=row["id"],
+            title=row["title"],
+            description=row["description"],
+            status=row["status"],
+            meta_info=loads_json(row["meta_info"], {}),
+            conversation_count=row["conversation_count"],
+            total_tokens=row["total_tokens"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
+
+    def _create_sqlite(self, data: SessionCreate) -> SessionRead:
+        now = get_east_8_time().isoformat()
+        session_id = new_id()
+        with connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO sessions (
+                    id, title, description, status, meta_info,
+                    conversation_count, total_tokens, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+                """,
+                (
+                    session_id,
+                    data.title,
+                    data.description,
+                    SessionStatus.ACTIVE.value,
+                    dumps_json(data.meta_info),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        return self._row_to_read(row)
+
+    def _get_sqlite(self, session_id: str) -> SessionRead | None:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        return self._row_to_read(row) if row else None
+
+    def _update_sqlite(
+        self, session_id: str, data: SessionUpdate
+    ) -> SessionRead | None:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is None:
+                return None
+
+            meta_info = (
+                dumps_json(data.meta_info)
+                if data.meta_info is not None
+                else row["meta_info"]
+            )
+            updated_at = get_east_8_time().isoformat()
+            conn.execute(
+                """
+                UPDATE sessions
+                SET title = ?, description = ?, status = ?, meta_info = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    data.title if data.title is not None else row["title"],
+                    data.description
+                    if data.description is not None
+                    else row["description"],
+                    data.status if data.status is not None else row["status"],
+                    meta_info,
+                    updated_at,
+                    session_id,
+                ),
+            )
+            conn.commit()
+            updated = conn.execute(
+                "SELECT * FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        return self._row_to_read(updated)
+
+    def _delete_sqlite(self, session_id: str) -> bool:
+        with connect() as conn:
+            result = conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            conn.commit()
+        return result.rowcount > 0
+
+    def _list_recent_sqlite(self, limit: int) -> list[SessionRead]:
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_read(row) for row in rows]
+
+    def _list_by_status_sqlite(self, status: str, limit: int) -> list[SessionRead]:
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM sessions
+                WHERE status = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (status, limit),
+            ).fetchall()
+        return [self._row_to_read(row) for row in rows]
 
     # Private implementation - requires manual session
 

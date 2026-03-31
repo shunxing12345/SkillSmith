@@ -81,9 +81,20 @@ class SkillStore:
         skill_name: str,
         request: str,
         summary: str,
+        execution_status: str = "success",
+        task_status: str = "uncertain",
+        verification_status: str = "unverified",
+        confidence: float = 0.35,
+        feedback_source: str = "runtime",
+        feedback_note: str = "",
         limit: int = 20,
     ) -> dict[str, Any]:
-        """Persist a recent successful execution example for regression replay."""
+        """Persist a structured successful execution example for regression replay.
+
+        Note:
+            "successful" here means execution reached a non-error envelope.
+            It does not imply the final user-visible task result is verified.
+        """
         self.history_directory.mkdir(parents=True, exist_ok=True)
         history_path = self.history_directory / f"{skill_name}.jsonl"
 
@@ -102,6 +113,12 @@ class SkillStore:
             "request": request,
             "summary": summary,
             "timestamp": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+            "execution_status": execution_status,
+            "task_status": task_status,
+            "verification_status": verification_status,
+            "confidence": confidence,
+            "feedback_source": feedback_source,
+            "feedback_note": feedback_note,
         }
         records = [
             r for r in records
@@ -136,7 +153,12 @@ class SkillStore:
                 records.append(json.loads(line))
             except Exception:
                 continue
-        return records[-limit:]
+        filtered = [
+            r for r in records
+            if str(r.get("execution_status", "success")) == "success"
+            and str(r.get("verification_status", "unverified")) != "user_rejected"
+        ]
+        return filtered[-limit:]
 
     async def store_candidate(
         self,

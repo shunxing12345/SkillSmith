@@ -11,6 +11,18 @@ from alembic.config import Config
 logger = logging.getLogger(__name__)
 
 
+def _normalize_alembic_db_url(db_url: str) -> str:
+    """Convert async SQLite URLs to a sync URL for Alembic.
+
+    Alembic migrations do not need the async driver. Using the sync SQLite
+    dialect keeps startup diagnostics and bootstrap independent from
+    ``aiosqlite`` worker-thread behavior.
+    """
+    if db_url.startswith("sqlite+aiosqlite:///"):
+        return db_url.replace("sqlite+aiosqlite:///", "sqlite:///", 1)
+    return db_url
+
+
 def _resolve_runtime_root() -> Path:
     """Resolve runtime project root for both dev and packaged environments.
 
@@ -34,6 +46,7 @@ def run_auto_upgrade(db_url: str) -> None:
     Must be called before UI startup.
     """
     root = _resolve_runtime_root()
+    alembic_db_url = _normalize_alembic_db_url(db_url)
 
     # In both dev and packaged layout, files live under middleware/storage/migrations
     alembic_ini = root / "middleware" / "storage" / "migrations" / "alembic.ini"
@@ -49,12 +62,12 @@ def run_auto_upgrade(db_url: str) -> None:
 
         # Critical for bundled mode: force absolute script path
         alembic_cfg.set_main_option("script_location", str(script_location))
-        alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+        alembic_cfg.set_main_option("sqlalchemy.url", alembic_db_url)
 
         logger.info("Running DB migration to head")
         logger.info("Alembic INI: {}", alembic_ini)
         logger.info("Script location: {}", script_location)
-        logger.info("DB URL: {}", db_url)
+        logger.info("DB URL: {}", alembic_db_url)
 
         command.upgrade(alembic_cfg, "head")
         logger.info("DB migration completed")

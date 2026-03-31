@@ -171,18 +171,16 @@ class UvLocalSandbox(BaseSandbox):
     def _create_pip_shim(self) -> None:
         """在 venv 中创建 pip 包装脚本。
 
-        uv venv 默认不包含 pip，创建 shim 调用 'python -m pip'。
+        uv venv 默认不包含 pip，创建 shim 转发到
+        `uv pip --python <venv-python>`，避免启动阶段额外联网安装 pip。
         """
         pip_path = pip_shim_path(self._venv_path)
-        pip_path.write_text(pip_shim_content(self._python_executable))
+        pip_path.write_text(
+            pip_shim_content(self._python_executable, self._uv_bin),
+            encoding="utf-8",
+        )
         chmod_executable(pip_path)
         logger.debug("Created pip shim at {}", pip_path)
-
-        success, _ = self.install_python_deps(["pip"], timeout=60)
-        if success:
-            logger.debug("Installed pip into venv")
-        else:
-            logger.debug("Could not install pip into venv (non-fatal)")
 
     def get_sandbox_env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         """获取沙箱环境变量。"""

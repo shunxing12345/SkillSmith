@@ -1,6 +1,7 @@
 """Doctor command for displaying configuration and environment info."""
 
 import sys
+from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 import typer
@@ -99,13 +100,25 @@ def _create_section_table(section_name: str, section_data: dict, parent_key: str
     return table
 
 
+def _resolve_app_version() -> str:
+    """Resolve installed package version with a safe fallback."""
+    try:
+        return pkg_version("memento-s")
+    except Exception:
+        return "0.1.0"
+
+
 def _create_summary_panel(data: dict):
     """Create a summary panel with key information."""
     active_profile = _get_nested_value(data, "llm.active_profile") or "N/A"
-    current_model = _get_nested_value(data, "llm.current.model") or "N/A"
-    provider = _get_nested_value(data, "llm.current.provider") or "N/A"
+    profiles = _get_nested_value(data, "llm.profiles") or {}
+    current_profile = (
+        profiles.get(active_profile, {}) if isinstance(profiles, dict) else {}
+    )
+    current_model = current_profile.get("model") or "N/A"
+    provider = current_model.split("/", 1)[0] if "/" in current_model else "N/A"
     app_name = _get_nested_value(data, "app.name") or "N/A"
-    version = _get_nested_value(data, "app.version") or "N/A"
+    version = _resolve_app_version()
 
     summary_text = f"""\
 [bold cyan]Application:[/bold cyan] {app_name} v{version}
@@ -141,17 +154,21 @@ def doctor_command() -> None:
     # Print environment check
     ok, no = "[green]✓[/green]", "[red]✗[/red]"
     workspace = cfg.paths.workspace_dir
-    cache_dir = cfg.paths.cache_dir
-    tmp_dir = cfg.paths.tmp_dir
+    skills_dir = cfg.paths.skills_dir
+    db_dir = cfg.paths.db_dir
+    logs_dir = cfg.paths.logs_dir
     console.print("[bold]Environment Check[/bold]")
     console.print(
         f"  Workspace:     {workspace} {ok if workspace and workspace.exists() else no}"
     )
     console.print(
-        f"  Cache:         {cache_dir} {ok if cache_dir and cache_dir.exists() else no}"
+        f"  Skills:        {skills_dir} {ok if skills_dir and skills_dir.exists() else no}"
     )
     console.print(
-        f"  Tmp:           {tmp_dir} {ok if tmp_dir and tmp_dir.exists() else no}"
+        f"  Database:      {db_dir} {ok if db_dir and db_dir.exists() else no}"
+    )
+    console.print(
+        f"  Logs:          {logs_dir} {ok if logs_dir and logs_dir.exists() else no}"
     )
     console.print()
 

@@ -386,8 +386,13 @@ class SkillProvider(SkillGateway):
         skill_name: str,
         request: str,
         envelope: SkillExecutionResponse,
+        task_status: str = "uncertain",
+        verification_status: str = "unverified",
+        confidence: float = 0.35,
+        feedback_source: str = "runtime",
+        feedback_note: str = "",
     ) -> dict[str, Any]:
-        """Record a successful execution example for future regression replay."""
+        """Record a structured execution-success example for future regression replay."""
         skill = self._find_local_skill(skill_name)
         if skill is None:
             return {"ok": False, "reason": "skill_not_local"}
@@ -395,6 +400,12 @@ class SkillProvider(SkillGateway):
             skill_name=skill.name,
             request=request,
             summary=envelope.summary or "",
+            execution_status="success",
+            task_status=task_status,
+            verification_status=verification_status,
+            confidence=confidence,
+            feedback_source=feedback_source,
+            feedback_note=feedback_note,
         )
 
     def list_candidates(self) -> list[dict[str, Any]]:

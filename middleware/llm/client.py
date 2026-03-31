@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -37,6 +38,12 @@ from .exceptions import (
 from .schema import LLMResponse, LLMStreamChunk, ToolCall, Message
 
 logger = get_logger()
+
+
+_REMOTE_AUTH_PROVIDERS = {"openai", "anthropic", "openrouter"}
+
+litellm.suppress_debug_info = True
+logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 
 
 @dataclass
@@ -195,16 +202,15 @@ class LLMClient:
             logger.error(f"Failed to load LLM config: {e}")
             raise
 
-    @staticmethod
-    def _detect_context_window(profile) -> int:
+    def _detect_context_window(self, profile) -> int:
         """尝试通过 litellm 自动检测模型 context window，失败则用 profile 默认值。"""
         try:
-            info = litellm.get_model_info(profile.model)
+            info = litellm.get_model_info(self._build_model_string())
             detected = info.get("max_input_tokens") or info.get("max_tokens")
             if detected and isinstance(detected, int) and detected > 0:
                 logger.info(
                     "Auto-detected context_window={} for model {}",
-                    detected, profile.model,
+                    detected, self._build_model_string(),
                 )
                 return detected
         except Exception:
@@ -214,6 +220,12 @@ class LLMClient:
     def _build_model_string(self) -> str:
         """构建 litellm 模型字符串。"""
         model = self.model
+
+        if model.startswith("openrouter/"):
+            return model
+
+        if self.base_url and "openrouter" in self.base_url:
+            return f"openrouter/{model}"
 
         if "/" in model:
             # 已有 provider 前缀，直接使用
@@ -230,6 +242,16 @@ class LLMClient:
 
         # 默认使用 anthropic
         return f"anthropic/{model}"
+
+    def _validate_auth_config(self) -> None:
+        """Fail fast when a remote provider is configured without an API key."""
+        model_str = self._build_model_string()
+        provider = model_str.split("/", 1)[0] if "/" in model_str else ""
+        if provider in _REMOTE_AUTH_PROVIDERS and not (self.api_key or "").strip():
+            raise LLMAuthenticationError(
+                "Missing API key for remote model provider",
+                model=model_str,
+            )
 
     @staticmethod
     def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -453,6 +475,7 @@ class LLMClient:
         completion_kwargs = self._build_completion_kwargs(
             full_messages, tools=tools, **kwargs
         )
+        self._validate_auth_config()
 
         async def _do_completion():
             return await acompletion(**completion_kwargs)
@@ -530,6 +553,7 @@ class LLMClient:
         completion_kwargs = self._build_completion_kwargs(
             full_messages, tools=tools, stream=True, **kwargs
         )
+        self._validate_auth_config()
 
         try:
             # 流式调用不经过 _call_with_retry，直接调用以支持 generator

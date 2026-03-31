@@ -42,18 +42,20 @@ def _cleanup_all_clients():
     clients = list(_active_clients)
     if clients:
         logger.debug("Cleaning up {} active EmbeddingClient(s)", len(clients))
+        import asyncio
+
         for client in clients:
             if hasattr(client, "_closed") and not client._closed:
                 try:
-                    # 尝试同步关闭
-                    import asyncio
-
                     try:
-                        loop = asyncio.get_event_loop()
-                        if not loop.is_running():
-                            loop.run_until_complete(client.close())
+                        loop = asyncio.get_running_loop()
                     except RuntimeError:
-                        pass
+                        loop = None
+
+                    if loop is None:
+                        asyncio.run(client.close())
+                except RuntimeError:
+                    logger.debug("Failed to synchronously close EmbeddingClient")
                 except Exception:
                     pass
 

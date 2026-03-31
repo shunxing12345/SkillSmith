@@ -18,6 +18,17 @@ from middleware.config import g_config
 
 
 @dataclass
+class RunOutcome:
+    """Final run-level outcome assessment."""
+
+    execution_status: str = "success"
+    task_status: str = "uncertain"
+    verification_status: str = "unverified"
+    confidence: float = 0.0
+    feedback_note: str = ""
+
+
+@dataclass
 class EnvironmentSnapshot:
     """Zero-LLM local environment context."""
 
@@ -148,6 +159,7 @@ class SessionContext:
     session_goal: str = ""
     action_history: list[ActionRecord] = field(default_factory=list)
     turn_count: int = 0
+    last_run_outcome: RunOutcome | None = None
 
     _plan_steps: list[str] = field(default_factory=list)
     _plan_statuses: list[str] = field(default_factory=list)
@@ -186,6 +198,23 @@ class SessionContext:
 
     def add_action(self, record: ActionRecord) -> None:
         self.action_history.append(record)
+
+    def set_run_outcome(
+        self,
+        *,
+        execution_status: str,
+        task_status: str,
+        verification_status: str,
+        confidence: float,
+        feedback_note: str = "",
+    ) -> None:
+        self.last_run_outcome = RunOutcome(
+            execution_status=execution_status,
+            task_status=task_status,
+            verification_status=verification_status,
+            confidence=confidence,
+            feedback_note=feedback_note,
+        )
 
     # ── Prompt rendering ─────────────────────────────────────────
 
@@ -244,5 +273,13 @@ class SessionContext:
         success = sum(1 for r in self.action_history if r.success)
         if total:
             parts.append(f"Actions: {success}/{total} succeeded")
+
+        if self.last_run_outcome is not None:
+            parts.append(
+                "Outcome: "
+                f"{self.last_run_outcome.task_status}"
+                f" ({self.last_run_outcome.verification_status}, "
+                f"conf={self.last_run_outcome.confidence:.2f})"
+            )
 
         return " | ".join(parts) if parts else "Empty session"

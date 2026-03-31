@@ -37,6 +37,7 @@ from utils.token_utils import estimate_tokens
 from utils.debug_logger import log_agent_start, log_agent_end, log_agent_phase
 
 console = Console()
+_DB_TIMEOUT_SEC = 2.0
 
 
 class _InteractiveInput:
@@ -262,29 +263,47 @@ async def _run_stream(
     session_id: str,
     message: str,
     render_markdown: bool,
-    conversation_manager: ConversationManager,
+    conversation_manager: ConversationManager | None,
+    history: list[dict[str, str]] | None = None,
 ) -> None:
     """Consume reply_stream events, render, and persist in unified pipeline."""
     renderer = _StreamRenderer(render_markdown)
 
     user_title = message[:50] + "..." if len(message) > 50 else message
-    user_conv = await conversation_manager.create_conversation(
-        session_id=session_id,
-        role="user",
-        title=user_title,
-        content=message,
-        meta_info={},
-    )
+    user_conv = None
+    if conversation_manager is not None:
+        try:
+            user_conv = await asyncio.wait_for(
+                conversation_manager.create_conversation(
+                    session_id=session_id,
+                    role="user",
+                    title=user_title,
+                    content=message,
+                    meta_info={},
+                ),
+                timeout=_DB_TIMEOUT_SEC,
+            )
+        except Exception as exc:
+            console.print(
+                f"[dim]Conversation persistence disabled: {type(exc).__name__}[/dim]"
+            )
+            conversation_manager = None
 
     async def _persist_assistant_output(content: str):
+        if conversation_manager is None:
+            return
         assistant_title = content[:50] + "..." if len(content) > 50 else content
-        await conversation_manager.create_conversation(
-            session_id=session_id,
-            role="assistant",
-            title=assistant_title,
-            content=content,
-            meta_info={"reply_to": user_conv.id},
-            tokens=estimate_tokens(content),
+        meta_info = {"reply_to": user_conv.id} if user_conv is not None else {}
+        await asyncio.wait_for(
+            conversation_manager.create_conversation(
+                session_id=session_id,
+                role="assistant",
+                title=assistant_title,
+                content=content,
+                meta_info=meta_info,
+                tokens=estimate_tokens(content),
+            ),
+            timeout=_DB_TIMEOUT_SEC,
         )
 
     pipeline = AGUIEventPipeline()
@@ -294,7 +313,7 @@ async def _run_stream(
     log_agent_phase("REPLY_STREAM", session_id, f"Processing: {message[:100]}...")
 
     async for event in agent_instance.reply_stream(
-        session_id=session_id, user_content=message
+        session_id=session_id, user_content=message, history=history
     ):
         await pipeline.emit(event)
         renderer.handle(event)
@@ -306,7 +325,7 @@ async def _run_interactive(
     session_id: str,
     inp: _InteractiveInput,
     render_markdown: bool,
-    conversation_manager: ConversationManager,
+    conversation_manager: ConversationManager | None,
 ) -> None:
     """Interactive REPL loop: read input, stream response, repeat."""
     _EXIT_COMMANDS = frozenset({"/q", ":q", "exit", "quit", "/exit", "/quit"})
@@ -326,6 +345,7 @@ async def _run_interactive(
                 command,
                 render_markdown,
                 conversation_manager,
+                history=[] if conversation_manager is None else None,
             )
         except (KeyboardInterrupt, EOFError):
             inp.teardown()
@@ -385,17 +405,41 @@ def agent_command(
         console.print(f"[dim]Initializing skill system... ({e})[/dim]")
         agent_instance = MementoSAgent()
     session_manager = SessionManager()
-    conversation_manager = ConversationManager()
+    conversation_manager: ConversationManager | None = ConversationManager()
+    persistence_enabled = True
 
     if session_id:
-        existing = asyncio.run(session_manager.get_session(session_id))
-        if existing is None:
-            raise ValueError(f"Session not found: {session_id}")
+        try:
+            existing = asyncio.run(
+                asyncio.wait_for(
+                    session_manager.get_session(session_id),
+                    timeout=_DB_TIMEOUT_SEC,
+                )
+            )
+            if existing is None:
+                raise ValueError(f"Session not found: {session_id}")
+        except Exception as exc:
+            persistence_enabled = False
+            conversation_manager = None
+            console.print(
+                f"[dim]Session storage unavailable, continuing without persistence: {type(exc).__name__}[/dim]\n"
+            )
     else:
-        created = asyncio.run(
-            session_manager.create_session(title="CLI Session", metadata={})
-        )
-        session_id = created["id"]
+        try:
+            created = asyncio.run(
+                asyncio.wait_for(
+                    session_manager.create_session(title="CLI Session", metadata={}),
+                    timeout=_DB_TIMEOUT_SEC,
+                )
+            )
+            session_id = created["id"]
+        except Exception as exc:
+            persistence_enabled = False
+            conversation_manager = None
+            session_id = generate_session_id()
+            console.print(
+                f"[dim]Session storage unavailable, using ephemeral session: {type(exc).__name__}[/dim]\n"
+            )
 
     _print_banner(workspace, session_id, version)
 
@@ -407,6 +451,7 @@ def agent_command(
                 message,
                 render_markdown=markdown,
                 conversation_manager=conversation_manager,
+                history=[] if not persistence_enabled else None,
             )
         )
         # DEBUG: 记录 Agent 结束（仅非交互模式）

@@ -237,6 +237,51 @@ Return a JSON object with exactly these fields:
 
 Return ONLY valid JSON, no extra text."""
 
+RUN_OUTCOME_PROMPT: Final[str] = """\
+You are evaluating the final quality of an agent run.
+
+User goal:
+{goal}
+
+Plan that was executed:
+{plan}
+
+Final answer shown to the user:
+{final_answer}
+
+Recent tool/skill actions:
+{recent_actions}
+
+Decide the run outcome conservatively.
+
+Definitions:
+- execution_status:
+  - "success": the run completed and produced a final answer
+  - "failed": the run ended without a usable final answer
+- task_status:
+  - "success": the final answer likely satisfies the user's goal
+  - "failed": the final answer clearly does not satisfy the goal
+  - "uncertain": there is not enough evidence to claim success
+- verification_status:
+  - "unverified": no external confirmation
+  - "program_verified": supported by explicit runtime checks or concrete tool evidence
+- confidence: 0.0 to 1.0
+
+Rules:
+- Be conservative. If evidence is mixed, choose task_status="uncertain".
+- A fluent answer alone is NOT enough for task success.
+- If the run produced a final answer but correctness is unclear, choose execution_status="success", task_status="uncertain", verification_status="unverified".
+- Only choose "program_verified" when the tool evidence strongly supports completion.
+
+Return ONLY valid JSON with exactly these fields:
+{{
+  "execution_status": "success|failed",
+  "task_status": "success|failed|uncertain",
+  "verification_status": "unverified|program_verified",
+  "confidence": 0.0,
+  "feedback_note": "..."
+}}"""
+
 SKILL_ATTRIBUTION_PROMPT: Final[str] = """\
 You are a failure attribution judge for a self-evolving skill system.
 
